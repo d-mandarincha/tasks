@@ -65,7 +65,6 @@ private:
     std::queue<T> buffer_;
     int capacity_;
     bool closed_;
-    
     std::mutex mtx_;
     std::condition_variable send_cv_;
     std::condition_variable recv_cv_;
