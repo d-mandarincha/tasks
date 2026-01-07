@@ -1,11 +1,11 @@
 #include <iostream>
 #include <vector>
+#include <windows.h>
 #include <chrono>
 #include <iomanip>
 #include <random>
 #include <sstream>
-#include <atomic>
-#include <windows.h>
+#include <mutex>
 
 class MatrixMultiplier {
 private:
@@ -13,79 +13,25 @@ private:
     std::vector<std::vector<int>> B;
     std::vector<std::vector<int>> C;
     int N;
-    std::atomic<int> block_counter;
+    std::mutex mtx;
 
     struct ThreadData {
-        MatrixMultiplier* multiplier;
-        int blockI;
-        int blockJ;
+        MatrixMultiplier* instance;
+        int iBlock;
+        int jBlock;
         int blockSize;
     };
 
-    static DWORD WINAPI MultiplyBlockThread(LPVOID lpParam) {
-        ThreadData* data = static_cast<ThreadData*>(lpParam);
-        data->multiplier->multiplyBlockImpl(data->blockI, data->blockJ, data->blockSize);
-        delete data;
-        return 0;
-    }
-
-    void multiplyBlockImpl(int blockI, int blockJ, int blockSize) {
-        int startRow = blockI * blockSize;
-        int endRow = std::min(startRow + blockSize, N);
-        int startCol = blockJ * blockSize;
-        int endCol = std::min(startCol + blockSize, N);
-        
-        int blocksPerDim = (N + blockSize - 1) / blockSize;
-        
-        std::vector<std::vector<int>> tempBlock(endRow - startRow, 
-                                               std::vector<int>(endCol - startCol, 0));
-        
-        for (int blockK = 0; blockK < blocksPerDim; blockK++) {
-            int kStart = blockK * blockSize;
-            int kEnd = std::min(kStart + blockSize, N);
-            
-            for (int i = startRow; i < endRow; i++) {
-                for (int j = startCol; j < endCol; j++) {
-                    int sum = 0;
-                    for (int k = kStart; k < kEnd; k++) {
-                        sum += A[i][k] * B[k][j];
-                    }
-                    tempBlock[i - startRow][j - startCol] += sum;
-                }
-            }
-        }
-        
-        for (int i = startRow; i < endRow; i++) {
-            for (int j = startCol; j < endCol; j++) {
-                C[i][j] = tempBlock[i - startRow][j - startCol];
-            }
-        }
-        
-        block_counter.fetch_add(1);
-    }
-
-    void multiplyBlockImplOld(int startRow, int endRow, int startCol, int endCol) {
-        int block_id = block_counter.fetch_add(1) + 1;
-        for (int i = startRow; i < endRow; i++) {
-            for (int j = startCol; j < endCol; j++) {
-                int sum = 0;
-                for (int k = 0; k < N; k++) {
-                    sum += A[i][k] * B[k][j];
-                }
-                C[i][j] = sum;
-            }
-        }
-    }
-
 public:
-    MatrixMultiplier(int size) : N(size), block_counter(0) {
+    MatrixMultiplier(int size) : N(size) {
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_int_distribution<> dis(1, 20);
+
         A.resize(N, std::vector<int>(N));
         B.resize(N, std::vector<int>(N));
         C.resize(N, std::vector<int>(N, 0));
-        
+
         for (int i = 0; i < N; i++) {
             for (int j = 0; j < N; j++) {
                 A[i][j] = dis(gen);
@@ -94,70 +40,87 @@ public:
         }
     }
 
-    long long multiplyParallel(int blockSize, bool showCalculations = true) {
+    // Статическая функция для потока Windows
+    static DWORD WINAPI MultiplyBlockThread(LPVOID lpParam) {
+        ThreadData* data = static_cast<ThreadData*>(lpParam);
+        data->instance->multiplyBlock(data->iBlock, data->jBlock, data->blockSize);
+        delete data;
+        return 0;
+    }
+
+    void multiplyBlock(int iBlock, int jBlock, int blockSize) {
+        int rowStart = iBlock * blockSize;
+        int rowEnd = std::min(rowStart + blockSize, N);
+        int colStart = jBlock * blockSize;
+        int colEnd = std::min(colStart + blockSize, N);
+
+        std::vector<std::vector<int>> localResult(rowEnd - rowStart,
+            std::vector<int>(colEnd - colStart, 0));
+
+        for (int kBlock = 0; kBlock < (N + blockSize - 1) / blockSize; kBlock++) {
+            int kStart = kBlock * blockSize;
+            int kEnd = std::min(kStart + blockSize, N);
+
+            for (int i = rowStart; i < rowEnd; i++) {
+                for (int j = colStart; j < colEnd; j++) {
+                    int sum = 0;
+                    for (int k = kStart; k < kEnd; k++) {
+                        sum += A[i][k] * B[k][j];
+                    }
+                    localResult[i - rowStart][j - colStart] += sum;
+                }
+            }
+        }
+
+        std::lock_guard<std::mutex> lock(mtx);
+        for (int i = rowStart; i < rowEnd; i++) {
+            for (int j = colStart; j < colEnd; j++) {
+                C[i][j] += localResult[i - rowStart][j - colStart];
+            }
+        }
+    }
+
+    long long multiplyParallel(int blockSize) {
         for (int i = 0; i < N; i++) {
             for (int j = 0; j < N; j++) {
                 C[i][j] = 0;
             }
         }
-        
-        block_counter = 0;
+
         auto start = std::chrono::high_resolution_clock::now();
-        
+
         std::vector<HANDLE> threads;
-        int blocksPerDim = (N + blockSize - 1) / blockSize;
-        int totalBlocks = blocksPerDim * blocksPerDim;
-        
-        for (int blockI = 0; blockI < blocksPerDim; blockI++) {
-            for (int blockJ = 0; blockJ < blocksPerDim; blockJ++) {
-                ThreadData* data = new ThreadData();
-                data->multiplier = this;
-                data->blockI = blockI;
-                data->blockJ = blockJ;
-                data->blockSize = blockSize;
+        int numBlocks = (N + blockSize - 1) / blockSize;
+
+        for (int iBlock = 0; iBlock < numBlocks; iBlock++) {
+            for (int jBlock = 0; jBlock < numBlocks; jBlock++) {
+                ThreadData* data = new ThreadData{this, iBlock, jBlock, blockSize};
                 
-                HANDLE thread = CreateThread(NULL, 0, MultiplyBlockThread, data, 0, NULL);
-                if (thread != NULL) {
-                    threads.push_back(thread);
-                } else {
+                HANDLE hThread = CreateThread(
+                    NULL,                   
+                    0,                      
+                    MultiplyBlockThread,    
+                    data,                   
+                    0,                      
+                    NULL                    
+                );
+                
+                if (hThread == NULL) {
+                    std::cerr << "Error creating thread: " << GetLastError() << std::endl;
                     delete data;
+                } else {
+                    threads.push_back(hThread);
                 }
             }
         }
-        
-        const DWORD MAX_WAIT_OBJECTS = 64;
-        size_t totalThreads = threads.size();
-        size_t processed = 0;
-        
-        while (processed < totalThreads) {
-            size_t remaining = totalThreads - processed;
-            size_t batchSize = std::min<size_t>(remaining, MAX_WAIT_OBJECTS);
-            
-            DWORD result = WaitForMultipleObjects(
-                static_cast<DWORD>(batchSize),
-                threads.data() + processed,
-                TRUE,
-                INFINITE
-            );
-            
-            if (result == WAIT_FAILED) {
-                break;
-            }
-            
-            for (size_t i = 0; i < batchSize; i++) {
-                CloseHandle(threads[processed + i]);
-            }
-            processed += batchSize;
+
+        WaitForMultipleObjects(threads.size(), threads.data(), TRUE, INFINITE);
+
+        for (HANDLE hThread : threads) {
+            CloseHandle(hThread);
         }
-        
+
         auto end = std::chrono::high_resolution_clock::now();
-        
-        if (showCalculations) {
-            std::cout << "\n========================================\n";
-            std::cout << "ALL BLOCKS PROCESSED\n";
-            std::cout << "========================================\n";
-        }
-        
         return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
     }
 
@@ -188,37 +151,34 @@ public:
 };
 
 int main() {
+    SetConsoleOutputCP(CP_UTF8);
+    
     const int N = 80;
     MatrixMultiplier multiplier(N);
     std::vector<std::vector<int>> standard = multiplier.computeStandard();
     
     std::cout << "\n=== PERFORMANCE COMPARISON ===\n";
-    std::cout << "\n2. Parallel algorithm with different block sizes:\n";
+    std::cout << "Matrix size: " << N << "x" << N << "\n";
+    std::cout << "\n2. Parallel algorithm with different block sizes (Windows Threads):\n";
     std::cout << std::setw(15) << "Block size"
-        << std::setw(20) << "Number of blocks"
-        << std::setw(20) << "Number of threads"
-        << std::setw(20) << "Time (microsec)"
-        << std::setw(20) << "Is Valid"
-        << std::endl;
+              << std::setw(20) << "Number of blocks"
+              << std::setw(20) << "Number of threads"
+              << std::setw(20) << "Time (microsec)"
+              << std::setw(20) << "Is Valid"
+              << std::endl;
+              
+    for (int k : {1, 2, 4, 5, 8, 10, 20, 40, 80}) {
+        int numBlocks = ((N + k - 1) / k) * ((N + k - 1) / k);
+        long long parTime = multiplier.multiplyParallel(k);
         
-    for (int k : { 1, 2, 4, 5, 8, 10, 20, 40, 80}) {
-        int blocksPerDim = (N + k - 1) / k;
-        int numBlocks = blocksPerDim * blocksPerDim;
-        
-        long long parTimeSimple = multiplier.multiplyParallel(k, false);
+        bool isValid = multiplier.verifyMultiplication(standard);
         
         std::cout << std::setw(15) << k << "x" << k
-            << std::setw(20) << numBlocks
-            << std::setw(20) << numBlocks
-            << std::setw(20) << parTimeSimple;
-            
-        if (multiplier.verifyMultiplication(standard)) {
-            std::cout << std::setw(20) << " [OK]";
-        }
-        else {
-            std::cout << std::setw(20) << " [ERROR]";
-        }
-        std::cout << std::endl;
-    }
+                  << std::setw(20) << numBlocks
+                  << std::setw(20) << numBlocks
+                  << std::setw(20) << parTime
+                  << std::setw(20) << (isValid ? " [OK]" : " [ERROR]")
+                  << std::endl;
+    }    
     return 0;
 }
