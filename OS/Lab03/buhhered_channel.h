@@ -38,15 +38,18 @@ public:
         std::unique_lock<std::mutex> lock(mtx_);
         
         recv_cv_.wait(lock, [this]() { 
-            return !buffer_.empty() || (closed_ && buffer_.empty()); 
+            return !buffer_.empty() || closed_; 
         });
+
+        if (buffer_.empty() && closed_) {
+            return { T(), false };
+        }
         
         if (!buffer_.empty()) {
             T value = std::move(buffer_.front());
             buffer_.pop();
             
             send_cv_.notify_one();
-            
             return {std::move(value), true};
         }
         
