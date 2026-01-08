@@ -1,0 +1,14 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="app/app.vcxproj" Id="df70946f-870d-465d-acb4-63901b35b3ad">
+    <BuildDependency Project="StaticLib1/StaticLib1.vcxproj" />
+    <BuildDependency Project="VectorLibrary/VectorLibrary.vcxproj" />
+  </Project>
+  <Project Path="StaticLib1/StaticLib1.vcxproj" Id="3d6f2e5e-ff4d-4644-956b-77eea205f09b" />
+  <Project Path="VectorLibrary/VectorLibrary.vcxproj" Id="c3d69eb9-2bdf-45ee-8cbe-c567afd1999e">
+    <BuildDependency Project="StaticLib1/StaticLib1.vcxproj" />
+  </Project>
+</Solution>

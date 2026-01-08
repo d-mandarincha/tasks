@@ -43,11 +43,11 @@ int main() {
     std::cout << "   num1 / num2 = " << (num1 / num2).getValue() << std::endl;
 
     std::cout << "\n3. Глобальные константы:\n";
-    std::cout << "   ZERO = " << ZERO.getValue() << std::endl;
-    std::cout << "   ONE = " << ONE.getValue() << std::endl;
+    std::cout << "   ZERO = " << Number::ZERO.getValue() << std::endl;
+    std::cout << "   ONE = " << Number::ONE.getValue() << std::endl;
 
     std::cout << "\n4. Сложные вычисления:\n";
-    Number result = (num1 * ONE) + (num2 * ZERO);
+    Number result = (num1 * Number::ONE) + (num2 * Number::ZERO);
     std::cout << "   (num1 * ONE) + (num2 * ZERO) = " << result.getValue() << std::endl;
 
     std::cout << "\n5. Проверка деления на ноль:\n";
